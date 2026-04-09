@@ -65,47 +65,52 @@ def start_capture(profile: Profile, output_dir: Path | None = None) -> Path:
 
     records = []
 
-    records.append(launch_process("event_driver", profile.ros.setup, profile.capture.event_driver_launch, log_dir))
+    try:
+        records.append(launch_process("event_driver", profile.ros.setup, profile.capture.event_driver_launch, log_dir))
 
-    if profile.capture.launch_renderer:
-        records.append(launch_process("event_renderer", profile.ros.setup, profile.capture.event_renderer_launch, log_dir))
+        if profile.capture.launch_renderer:
+            records.append(launch_process("event_renderer", profile.ros.setup, profile.capture.event_renderer_launch, log_dir))
 
-    if profile.capture.launch_basler:
-        records.append(launch_process("basler_driver", profile.ros.setup, profile.capture.basler_launch, log_dir))
+        if profile.capture.launch_basler:
+            records.append(launch_process("basler_driver", profile.ros.setup, profile.capture.basler_launch, log_dir))
 
-    topics = [
-        profile.topics.event_packets,
-        profile.topics.basler_image,
-        profile.topics.basler_info,
-    ]
-    if profile.capture.include_renderer_topic:
-        topics.append(profile.topics.event_image)
+        topics = [
+            profile.topics.event_packets,
+            profile.topics.basler_image,
+            profile.topics.basler_info,
+        ]
+        if profile.capture.include_renderer_topic:
+            topics.append(profile.topics.event_image)
 
-    _wait_for_topics(profile, topics, profile.capture.wait_topics_sec)
+        _wait_for_topics(profile, topics, profile.capture.wait_topics_sec)
 
-    bag_topics = [profile.topics.event_packets, profile.topics.basler_image, profile.topics.basler_info]
-    if profile.capture.include_renderer_topic:
-        bag_topics.append(profile.topics.event_image)
+        bag_topics = [profile.topics.event_packets, profile.topics.basler_image, profile.topics.basler_info]
+        if profile.capture.include_renderer_topic:
+            bag_topics.append(profile.topics.event_image)
 
-    topics_arg = " ".join(shlex.quote(topic) for topic in bag_topics)
-    record_cmd = (
-        f"ros2 bag record --storage {shlex.quote(profile.capture.storage_id)} "
-        f"-o {shlex.quote(str(output_dir))} --topics {topics_arg}"
-    )
-    records.append(launch_process("bag_record", profile.ros.setup, record_cmd, log_dir))
+        topics_arg = " ".join(shlex.quote(topic) for topic in bag_topics)
+        record_cmd = (
+            f"ros2 bag record --storage {shlex.quote(profile.capture.storage_id)} "
+            f"-o {shlex.quote(str(output_dir))} --topics {topics_arg}"
+        )
+        records.append(launch_process("bag_record", profile.ros.setup, record_cmd, log_dir))
 
-    state = SessionState(
-        profile_name=profile.name,
-        bag_dir=str(output_dir),
-        processes=records,
-    )
-    write_state(state_path, state)
-    latest_link = profile.paths.bags_dir / "latest"
-    if latest_link.is_symlink() or latest_link.exists():
-        latest_link.unlink()
-    latest_link.symlink_to(output_dir, target_is_directory=True)
+        state = SessionState(
+            profile_name=profile.name,
+            bag_dir=str(output_dir),
+            processes=records,
+        )
+        write_state(state_path, state)
+        latest_link = profile.paths.bags_dir / "latest"
+        if latest_link.is_symlink() or latest_link.exists():
+            latest_link.unlink()
+        latest_link.symlink_to(output_dir, target_is_directory=True)
 
-    return output_dir
+        return output_dir
+    except Exception:
+        for proc in reversed(records):
+            terminate_process_group(proc.pid)
+        raise
 
 
 def stop_capture(profile: Profile) -> Path:

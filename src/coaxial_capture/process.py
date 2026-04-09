@@ -27,8 +27,18 @@ class SessionState:
 
 
 def _compose_ros_shell_command(ros_setup: Path, command: str) -> str:
-    safe_setup = shlex.quote(str(ros_setup))
-    return f"source {safe_setup} && {command}"
+    setup_candidates = [
+        ros_setup,
+        Path("/opt/basler_ws/install/setup.bash"),
+        Path("/workspace/install/setup.bash"),
+    ]
+
+    setup_steps: list[str] = []
+    for setup_file in setup_candidates:
+        safe_setup = shlex.quote(str(setup_file))
+        setup_steps.append(f"if [[ -f {safe_setup} ]]; then source {safe_setup}; fi")
+
+    return f"{' && '.join(setup_steps)} && {command}"
 
 
 def launch_process(name: str, ros_setup: Path, command: str, log_dir: Path) -> ProcessRecord:
