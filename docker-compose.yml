@@ -1,0 +1,28 @@
+services:
+  coaxial_capture:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ros2-jazzy-coaxial-capture:latest
+    container_name: ros2_jazzy_coaxial_capture
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      DISPLAY: ${DISPLAY}
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+      QT_X11_NO_MITSHM: "1"
+      PYTHONPATH: /workspace/src
+    volumes:
+      - ./:/workspace
+      - ./bags:/workspace/bags
+      - ./logs:/workspace/logs
+      - ./outputs:/workspace/outputs
+      - ./installers:/installers
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /dev/bus/usb:/dev/bus/usb
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: sleep infinity

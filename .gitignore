@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+bags/
+logs/
+outputs/
+*.mcap
+*.db3
+.DS_Store
+.installers/*

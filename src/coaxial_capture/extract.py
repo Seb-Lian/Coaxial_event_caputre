@@ -1,0 +1,531 @@
+from __future__ import annotations
+
+import csv
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Deque, Optional
+
+import cv2
+import h5py
+import numpy as np
+from cv_bridge import CvBridge
+from event_camera_msgs.msg import EventPacket
+from rclpy.serialization import deserialize_message
+from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
+from sensor_msgs.msg import Image
+
+from .profile import Profile
+
+
+def stamp_to_ns(msg: Image) -> int:
+    return int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+
+
+@dataclass
+class EventChunk:
+    t_ns: np.ndarray
+    x: np.ndarray
+    y: np.ndarray
+    p: np.ndarray
+    t_min_ns: int
+    t_max_ns: int
+
+
+class Evt3DecoderState:
+    ADDR_Y = 0
+    ADDR_X = 2
+    VECT_BASE_X = 3
+    VECT_12 = 4
+    VECT_8 = 5
+    TIME_LOW = 6
+    TIME_HIGH = 8
+
+    def __init__(self, width: int, height: int) -> None:
+        self.ey = 0
+        self.time_low = 0
+        self.time_high = 0
+        self.current_polarity = 0
+        self.current_base_x = 0
+        self.has_valid_time = False
+        self.time_mult_ns = 1000
+        self.width = width
+        self.height = height
+
+    @staticmethod
+    def _update_high_time(t: int, current_high: int) -> int:
+        last_high = (current_high >> 12) & ((1 << 12) - 1)
+        if t < last_high and (last_high - t) > 10:
+            current_high += 1 << 24
+        current_high = (current_high & (~((1 << 24) - 1))) | (int(t) << 12)
+        return current_high
+
+    def _make_time_ns(self) -> int:
+        return int((self.time_high | self.time_low) * self.time_mult_ns)
+
+    def decode_packet(self, msg: EventPacket) -> Optional[EventChunk]:
+        encoding = msg.encoding.lower().strip()
+        if encoding != "evt3":
+            raise RuntimeError(f"Unsupported event encoding '{msg.encoding}'. Only evt3 is supported.")
+
+        if msg.width > 0:
+            self.width = int(msg.width)
+        if msg.height > 0:
+            self.height = int(msg.height)
+
+        payload = bytes(msg.events)
+        n_words = len(payload) // 2
+        if n_words == 0:
+            return None
+
+        t_list: list[int] = []
+        x_list: list[int] = []
+        y_list: list[int] = []
+        p_list: list[int] = []
+
+        idx = 0
+        if not self.has_valid_time:
+            has_valid_high_time = False
+            while idx < n_words and not self.has_valid_time:
+                word = payload[2 * idx] | (payload[2 * idx + 1] << 8)
+                code = (word >> 12) & 0xF
+                rest = word & 0x0FFF
+                if code == self.TIME_LOW:
+                    self.time_low = rest
+                    if has_valid_high_time:
+                        self.has_valid_time = True
+                elif code == self.TIME_HIGH:
+                    self.time_high = self._update_high_time(rest, self.time_high)
+                    has_valid_high_time = True
+                idx += 1
+
+        for i in range(idx, n_words):
+            word = payload[2 * i] | (payload[2 * i + 1] << 8)
+            code = (word >> 12) & 0xF
+            rest = word & 0x0FFF
+
+            if code == self.ADDR_X:
+                x = rest & 0x07FF
+                pol = (rest >> 11) & 0x1
+                if x < self.width and self.ey < self.height and self.has_valid_time:
+                    t_list.append(self._make_time_ns())
+                    x_list.append(x)
+                    y_list.append(self.ey)
+                    p_list.append(pol)
+            elif code == self.ADDR_Y:
+                self.ey = rest & 0x07FF
+            elif code == self.TIME_LOW:
+                self.time_low = rest
+            elif code == self.TIME_HIGH:
+                self.time_high = self._update_high_time(rest, self.time_high)
+            elif code == self.VECT_BASE_X:
+                self.current_base_x = rest & 0x07FF
+                self.current_polarity = (rest >> 11) & 0x1
+            elif code == self.VECT_8:
+                valid = rest & 0x00FF
+                if self.has_valid_time:
+                    ts = self._make_time_ns()
+                    for bit in range(8):
+                        if valid & (1 << bit):
+                            x = self.current_base_x + bit
+                            if x < self.width and self.ey < self.height:
+                                t_list.append(ts)
+                                x_list.append(x)
+                                y_list.append(self.ey)
+                                p_list.append(self.current_polarity)
+                self.current_base_x += 8
+            elif code == self.VECT_12:
+                valid = rest & 0x0FFF
+                if self.has_valid_time:
+                    ts = self._make_time_ns()
+                    for bit in range(12):
+                        if valid & (1 << bit):
+                            x = self.current_base_x + bit
+                            if x < self.width and self.ey < self.height:
+                                t_list.append(ts)
+                                x_list.append(x)
+                                y_list.append(self.ey)
+                                p_list.append(self.current_polarity)
+                self.current_base_x += 12
+
+        if not t_list:
+            return None
+
+        t_ns = np.asarray(t_list, dtype=np.int64)
+        x = np.asarray(x_list, dtype=np.int32)
+        y = np.asarray(y_list, dtype=np.int32)
+        p = np.asarray(p_list, dtype=np.uint8)
+        return EventChunk(
+            t_ns=t_ns,
+            x=x,
+            y=y,
+            p=p,
+            t_min_ns=int(t_ns.min()),
+            t_max_ns=int(t_ns.max()),
+        )
+
+
+class RawEventWriters:
+    def __init__(self, output_dir: Path, write_csv: bool, write_hdf5: bool) -> None:
+        self.csv_file = None
+        self.csv_writer = None
+        self.h5_file = None
+        self.h5_t = None
+        self.h5_x = None
+        self.h5_y = None
+        self.h5_p = None
+        self.h5_len = 0
+
+        if write_csv:
+            csv_path = output_dir / "raw_events.csv"
+            self.csv_file = csv_path.open("w", newline="", encoding="utf-8")
+            self.csv_writer = csv.writer(self.csv_file)
+            self.csv_writer.writerow(["t_ns", "x", "y", "p"])
+
+        if write_hdf5:
+            h5_path = output_dir / "raw_events.h5"
+            self.h5_file = h5py.File(h5_path, "w")
+            self.h5_t = self.h5_file.create_dataset("t_ns", shape=(0,), maxshape=(None,), dtype="i8")
+            self.h5_x = self.h5_file.create_dataset("x", shape=(0,), maxshape=(None,), dtype="i4")
+            self.h5_y = self.h5_file.create_dataset("y", shape=(0,), maxshape=(None,), dtype="i4")
+            self.h5_p = self.h5_file.create_dataset("p", shape=(0,), maxshape=(None,), dtype="u1")
+
+    def append(self, t_ns: np.ndarray, x: np.ndarray, y: np.ndarray, p: np.ndarray) -> None:
+        if t_ns.size == 0:
+            return
+
+        if self.csv_writer is not None:
+            for i in range(t_ns.size):
+                self.csv_writer.writerow([int(t_ns[i]), int(x[i]), int(y[i]), int(p[i])])
+
+        if self.h5_file is not None and self.h5_t is not None and self.h5_x is not None and self.h5_y is not None and self.h5_p is not None:
+            count = t_ns.size
+            new_len = self.h5_len + count
+            self.h5_t.resize((new_len,))
+            self.h5_x.resize((new_len,))
+            self.h5_y.resize((new_len,))
+            self.h5_p.resize((new_len,))
+            self.h5_t[self.h5_len:new_len] = t_ns
+            self.h5_x[self.h5_len:new_len] = x
+            self.h5_y[self.h5_len:new_len] = y
+            self.h5_p[self.h5_len:new_len] = p
+            self.h5_len = new_len
+
+    def close(self) -> None:
+        if self.csv_file is not None:
+            self.csv_file.flush()
+            self.csv_file.close()
+        if self.h5_file is not None:
+            self.h5_file.flush()
+            self.h5_file.close()
+
+
+class OfflineExtractor:
+    def __init__(self, profile: Profile, bag_path: Path, output_dir: Path) -> None:
+        self.profile = profile
+        self.bag_path = bag_path
+        self.output_dir = output_dir
+
+        self.basler_dir = self.output_dir / "basler"
+        self.event_dir = self.output_dir / "event"
+        self.basler_dir.mkdir(parents=True, exist_ok=True)
+        self.event_dir.mkdir(parents=True, exist_ok=True)
+
+        self.window_ns = int(profile.extraction.window_ms * 1_000_000.0)
+        self.image_ext = profile.extraction.image_ext.lower().strip(".")
+        self.color_mode = profile.extraction.color_mode
+        self.transparent_bg = profile.extraction.transparent_bg
+        self.skip_empty = profile.extraction.skip_empty_windows
+        self.max_pairs = profile.extraction.max_pairs
+
+        if self.image_ext not in {"png", "jpg", "jpeg"}:
+            raise ValueError("image_ext must be png, jpg, or jpeg")
+
+        self.bridge = CvBridge()
+        self.decoder = Evt3DecoderState(
+            width=profile.extraction.event_resolution.width,
+            height=profile.extraction.event_resolution.height,
+        )
+
+        self.event_chunks: Deque[EventChunk] = deque()
+        self.pending_basler: Deque[tuple[Image, int]] = deque()
+        self.latest_event_ns: Optional[int] = None
+
+        self.pair_count = 0
+        self.basler_seen = 0
+        self.event_packets_seen = 0
+        self.empty_windows = 0
+
+        self.pairs_csv_path = self.output_dir / "pairs.csv"
+        self.pairs_csv_file = self.pairs_csv_path.open("w", newline="", encoding="utf-8")
+        self.pairs_writer = csv.writer(self.pairs_csv_file)
+        self.pairs_writer.writerow(
+            [
+                "pair_index",
+                "basler_stamp_ns",
+                "event_ref_stamp_ns",
+                "delta_us",
+                "event_count",
+                "window_start_ns",
+                "window_end_ns",
+                "basler_path",
+                "event_path",
+            ]
+        )
+
+        self.raw_writer = RawEventWriters(
+            output_dir=self.output_dir,
+            write_csv=profile.extraction.raw_events_csv,
+            write_hdf5=profile.extraction.raw_events_hdf5,
+        )
+
+    def add_event_packet(self, msg: EventPacket) -> None:
+        self.event_packets_seen += 1
+        chunk = self.decoder.decode_packet(msg)
+        if chunk is None:
+            self.process_pending(flush=False)
+            self.prune_chunks()
+            return
+
+        header_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+        packet_offset_ns = header_ns - chunk.t_max_ns
+        chunk.t_ns = chunk.t_ns + packet_offset_ns
+        chunk.t_min_ns += packet_offset_ns
+        chunk.t_max_ns += packet_offset_ns
+
+        self.raw_writer.append(chunk.t_ns, chunk.x, chunk.y, chunk.p)
+
+        self.event_chunks.append(chunk)
+        self.latest_event_ns = chunk.t_max_ns
+
+        self.process_pending(flush=False)
+        self.prune_chunks()
+
+    def add_basler_image(self, msg: Image) -> None:
+        ts_ns = stamp_to_ns(msg)
+        self.pending_basler.append((msg, ts_ns))
+        self.basler_seen += 1
+
+        self.process_pending(flush=False)
+        self.prune_chunks()
+
+    def prune_chunks(self) -> None:
+        if not self.event_chunks:
+            return
+
+        if self.pending_basler:
+            keep_from_ns = self.pending_basler[0][1] - self.window_ns
+        elif self.latest_event_ns is not None:
+            keep_from_ns = self.latest_event_ns - max(5 * self.window_ns, 5_000_000_000)
+        else:
+            return
+
+        while self.event_chunks and self.event_chunks[0].t_max_ns < keep_from_ns:
+            self.event_chunks.popleft()
+
+    def process_pending(self, flush: bool) -> None:
+        while self.pending_basler:
+            basler_msg, basler_ns = self.pending_basler[0]
+            window_end_ns = basler_ns + self.window_ns
+
+            if not flush:
+                if self.latest_event_ns is None or self.latest_event_ns < window_end_ns:
+                    break
+
+            self.pending_basler.popleft()
+            self.save_pair(basler_msg, basler_ns)
+
+            if self.max_pairs > 0 and self.pair_count >= self.max_pairs:
+                return
+
+    def collect_window_events(self, start_ns: int, end_ns: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        t_parts: list[np.ndarray] = []
+        x_parts: list[np.ndarray] = []
+        y_parts: list[np.ndarray] = []
+        p_parts: list[np.ndarray] = []
+
+        for chunk in self.event_chunks:
+            if chunk.t_max_ns < start_ns:
+                continue
+            if chunk.t_min_ns > end_ns:
+                break
+
+            mask = (chunk.t_ns >= start_ns) & (chunk.t_ns <= end_ns)
+            if np.any(mask):
+                t_parts.append(chunk.t_ns[mask])
+                x_parts.append(chunk.x[mask])
+                y_parts.append(chunk.y[mask])
+                p_parts.append(chunk.p[mask])
+
+        if not t_parts:
+            empty_i64 = np.asarray([], dtype=np.int64)
+            empty_i32 = np.asarray([], dtype=np.int32)
+            empty_u8 = np.asarray([], dtype=np.uint8)
+            return empty_i64, empty_i32, empty_i32, empty_u8
+
+        return (
+            np.concatenate(t_parts),
+            np.concatenate(x_parts),
+            np.concatenate(y_parts),
+            np.concatenate(p_parts),
+        )
+
+    def render_event_image(self, x: np.ndarray, y: np.ndarray, p: np.ndarray) -> np.ndarray:
+        width = max(1, self.decoder.width)
+        height = max(1, self.decoder.height)
+
+        if self.transparent_bg:
+            img = np.zeros((height, width, 4), dtype=np.uint8)
+        elif self.color_mode == "blue-red":
+            img = np.zeros((height, width, 3), dtype=np.uint8)
+        else:
+            img = np.full((height, width), 127, dtype=np.uint8)
+
+        if x.size == 0:
+            return img
+
+        x = np.clip(x, 0, width - 1)
+        y = np.clip(y, 0, height - 1)
+
+        if self.transparent_bg:
+            on_mask = p.astype(bool)
+            off_mask = ~on_mask
+            img[y[on_mask], x[on_mask], :3] = (0, 0, 255)
+            img[y[off_mask], x[off_mask], :3] = (255, 0, 0)
+            img[y, x, 3] = 255
+            return img
+
+        if self.color_mode == "blue-red":
+            on_mask = p.astype(bool)
+            off_mask = ~on_mask
+            img[y[on_mask], x[on_mask], :] = (0, 0, 255)
+            img[y[off_mask], x[off_mask], :] = (255, 0, 0)
+            return img
+
+        on_mask = p.astype(bool)
+        off_mask = ~on_mask
+        img[y[on_mask], x[on_mask]] = 255
+        img[y[off_mask], x[off_mask]] = 0
+        return img
+
+    def save_pair(self, basler_msg: Image, basler_ns: int) -> None:
+        if self.max_pairs > 0 and self.pair_count >= self.max_pairs:
+            return
+
+        window_start_ns = basler_ns - self.window_ns
+        window_end_ns = basler_ns + self.window_ns
+        t_ns, x, y, p = self.collect_window_events(window_start_ns, window_end_ns)
+        event_count = int(t_ns.size)
+
+        if event_count == 0 and self.skip_empty:
+            self.empty_windows += 1
+            return
+
+        try:
+            basler_img = self.bridge.imgmsg_to_cv2(basler_msg, desired_encoding="passthrough")
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to convert Basler image: {exc}") from exc
+
+        event_img = self.render_event_image(x, y, p)
+
+        ref_ns = int(np.median(t_ns)) if event_count > 0 else basler_ns
+        delta_us = (ref_ns - basler_ns) / 1000.0
+
+        stem = f"pair_{self.pair_count:06d}_{basler_ns}"
+        basler_name = f"{stem}_basler.{self.image_ext}"
+        event_name = f"{stem}_event.{self.image_ext}"
+
+        basler_path = self.basler_dir / basler_name
+        event_path = self.event_dir / event_name
+
+        if not cv2.imwrite(str(basler_path), basler_img):
+            raise RuntimeError(f"Failed writing {basler_path}")
+        if not cv2.imwrite(str(event_path), event_img):
+            raise RuntimeError(f"Failed writing {event_path}")
+
+        self.pairs_writer.writerow(
+            [
+                self.pair_count,
+                basler_ns,
+                ref_ns,
+                f"{delta_us:.3f}",
+                event_count,
+                window_start_ns,
+                window_end_ns,
+                str(Path("basler") / basler_name),
+                str(Path("event") / event_name),
+            ]
+        )
+
+        self.pair_count += 1
+        if self.pair_count % 50 == 0:
+            self.pairs_csv_file.flush()
+
+    def run(self) -> None:
+        reader = SequentialReader()
+        storage_options = StorageOptions(uri=str(self.bag_path), storage_id=self.profile.capture.storage_id)
+        converter_options = ConverterOptions("", "")
+        reader.open(storage_options, converter_options)
+
+        topic_type = {topic.name: topic.type for topic in reader.get_all_topics_and_types()}
+        basler_topic = self.profile.topics.basler_image
+        event_topic = self.profile.topics.event_packets
+
+        if basler_topic not in topic_type:
+            raise RuntimeError(f"Missing Basler topic in bag: {basler_topic}")
+        if event_topic not in topic_type:
+            raise RuntimeError(f"Missing event topic in bag: {event_topic}")
+
+        while reader.has_next():
+            topic, serialized_data, _ = reader.read_next()
+            if topic == event_topic:
+                msg = deserialize_message(serialized_data, EventPacket)
+                self.add_event_packet(msg)
+            elif topic == basler_topic:
+                msg = deserialize_message(serialized_data, Image)
+                self.add_basler_image(msg)
+
+            if self.max_pairs > 0 and self.pair_count >= self.max_pairs:
+                break
+
+        self.process_pending(flush=True)
+
+    def close(self) -> dict[str, int]:
+        self.pairs_csv_file.flush()
+        self.pairs_csv_file.close()
+        self.raw_writer.close()
+
+        summary = {
+            "pairs_saved": self.pair_count,
+            "basler_frames_seen": self.basler_seen,
+            "event_packets_seen": self.event_packets_seen,
+            "empty_windows_skipped": self.empty_windows,
+        }
+
+        summary_path = self.output_dir / "summary.csv"
+        with summary_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["metric", "value"])
+            for key, value in summary.items():
+                writer.writerow([key, value])
+
+        return summary
+
+
+def run_extraction(profile: Profile, bag_path: Path, output_dir: Path | None = None) -> tuple[Path, dict[str, int]]:
+    bag_path = bag_path.expanduser().resolve()
+    if not (bag_path / "metadata.yaml").exists():
+        raise RuntimeError(f"Bag path is missing metadata.yaml: {bag_path}")
+
+    if output_dir is None:
+        output_dir = profile.paths.outputs_dir / f"{profile.extraction.output_subdir}_{bag_path.name}"
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    extractor = OfflineExtractor(profile=profile, bag_path=bag_path, output_dir=output_dir)
+    try:
+        extractor.run()
+    finally:
+        summary = extractor.close()
+
+    return output_dir, summary

@@ -1,0 +1,42 @@
+name: default
+ros:
+  setup: /opt/ros/jazzy/setup.bash
+  domain_id: 0
+  middleware: rmw_cyclonedds_cpp
+
+paths:
+  workspace_root: /workspace
+  bags_dir: /workspace/bags
+  logs_dir: /workspace/logs
+  outputs_dir: /workspace/outputs
+  state_dir: /workspace/.state
+
+capture:
+  storage_id: mcap
+  wait_topics_sec: 15
+  include_renderer_topic: true
+  launch_renderer: true
+  launch_basler: true
+  event_driver_launch: "ros2 launch metavision_driver driver_composition.launch.py serial:=00051466"
+  event_renderer_launch: "ros2 launch event_camera_renderer renderer.launch.py"
+  basler_launch: "/workspace/scripts/basler_launch_helper.sh --config-file /workspace/config/basler/my_camera.yaml --camera-id my_camera --startup-user-set CurrentSetting"
+
+topics:
+  event_packets: /event_camera/events
+  event_image: /event_camera/renderer/image_raw
+  basler_image: /my_camera/pylon_ros2_camera_node/image_raw
+  basler_info: /my_camera/pylon_ros2_camera_node/camera_info
+
+extraction:
+  window_ms: 12.0
+  image_ext: png
+  color_mode: blue-red
+  transparent_bg: true
+  skip_empty_windows: false
+  max_pairs: 0
+  output_subdir: synced_pairs
+  raw_events_csv: true
+  raw_events_hdf5: true
+  event_resolution:
+    width: 1280
+    height: 720

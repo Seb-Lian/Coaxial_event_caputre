@@ -1,0 +1,13 @@
+.git
+.gitignore
+bags/
+logs/
+outputs/
+.state/
+__pycache__/
+*.pyc
+*.mcap
+*.db3
+*.sqlite3
+*.h5
+*.csv
