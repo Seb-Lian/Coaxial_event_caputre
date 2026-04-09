@@ -14,8 +14,8 @@ paths:
 capture:
   storage_id: mcap
   wait_topics_sec: 15
-  include_renderer_topic: true
-  launch_renderer: true
+  include_renderer_topic: false
+  launch_renderer: false
   launch_basler: true
   event_driver_launch: "ros2 launch metavision_driver driver_composition.launch.py serial:=00051466"
   event_renderer_launch: "ros2 launch event_camera_renderer renderer.launch.py"

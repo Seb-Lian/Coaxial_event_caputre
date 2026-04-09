@@ -86,6 +86,7 @@ Extraction output directory:
 - `capture.event_renderer_launch`: Renderer launch command.
 - `capture.basler_launch`: Basler launch helper command.
 - `capture.wait_topics_sec`: Timeout before recording starts.
+- Default capture records raw event packets only (`capture.launch_renderer: false`, `capture.include_renderer_topic: false`).
 - `extraction.window_ms`: Event window half-width around each Basler frame timestamp.
 
 ## Notes

@@ -44,6 +44,26 @@ def _state_path(profile: Profile) -> Path:
     return profile.paths.state_dir / "capture_session.json"
 
 
+def _read_log_tail(log_path: Path, max_lines: int = 20) -> str:
+    if not log_path.exists():
+        return ""
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if not lines:
+        return ""
+    return "\n".join(lines[-max_lines:])
+
+
+def _assert_process_alive(pid: int, name: str, log_path: Path) -> None:
+    # Give the process a moment to fail-fast on launch-time errors.
+    time.sleep(1.0)
+    if process_alive(pid):
+        return
+
+    log_tail = _read_log_tail(log_path)
+    details = f"\nRecent log output:\n{log_tail}" if log_tail else ""
+    raise RuntimeError(f"Process '{name}' exited during startup.{details}")
+
+
 def start_capture(profile: Profile, output_dir: Path | None = None) -> Path:
     ensure_profile_dirs(profile)
     state_path = _state_path(profile)
@@ -59,7 +79,10 @@ def start_capture(profile: Profile, output_dir: Path | None = None) -> Path:
         stamp = dt.datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
         output_dir = profile.paths.bags_dir / f"sync_{stamp}"
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if output_dir.exists():
+        raise RuntimeError(f"Output bag directory already exists: {output_dir}")
+
+    profile.paths.bags_dir.mkdir(parents=True, exist_ok=True)
     log_dir = profile.paths.logs_dir / output_dir.name
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -93,7 +116,9 @@ def start_capture(profile: Profile, output_dir: Path | None = None) -> Path:
             f"ros2 bag record --storage {shlex.quote(profile.capture.storage_id)} "
             f"-o {shlex.quote(str(output_dir))} --topics {topics_arg}"
         )
-        records.append(launch_process("bag_record", profile.ros.setup, record_cmd, log_dir))
+        bag_record = launch_process("bag_record", profile.ros.setup, record_cmd, log_dir)
+        records.append(bag_record)
+        _assert_process_alive(bag_record.pid, bag_record.name, Path(bag_record.log_path))
 
         state = SessionState(
             profile_name=profile.name,
