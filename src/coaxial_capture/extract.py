@@ -4,12 +4,11 @@ import csv
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Deque, Optional
+from typing import Callable, Deque, Optional
 
 import cv2
 import h5py
 import numpy as np
-from cv_bridge import CvBridge
 from event_camera_msgs.msg import EventPacket
 from rclpy.serialization import deserialize_message
 from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
@@ -20,6 +19,72 @@ from .profile import Profile
 
 def stamp_to_ns(msg: Image) -> int:
     return int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+
+
+def image_msg_to_cv2(msg: Image) -> np.ndarray:
+    encoding = msg.encoding.lower().strip()
+    if not encoding:
+        raise RuntimeError("Image message has empty encoding")
+
+    # Common encodings used by Basler and ROS image pipelines.
+    if encoding in {"mono8", "8uc1"}:
+        dtype = np.uint8
+        channels = 1
+    elif encoding in {"mono16", "16uc1", "16sc1"}:
+        dtype = np.uint16
+        channels = 1
+    elif encoding in {"bgr8", "rgb8", "8uc3"}:
+        dtype = np.uint8
+        channels = 3
+    elif encoding in {"bgra8", "rgba8", "8uc4"}:
+        dtype = np.uint8
+        channels = 4
+    else:
+        raise RuntimeError(f"Unsupported image encoding: {msg.encoding}")
+
+    itemsize = np.dtype(dtype).itemsize
+    expected_row_bytes = int(msg.width) * channels * itemsize
+    if int(msg.step) < expected_row_bytes:
+        raise RuntimeError(
+            f"Invalid image step {msg.step} for encoding {msg.encoding}; expected at least {expected_row_bytes}"
+        )
+
+    data = np.frombuffer(msg.data, dtype=dtype)
+    total_values_per_row = int(msg.step) // itemsize
+    needed_values = int(msg.height) * total_values_per_row
+    if data.size < needed_values:
+        raise RuntimeError(
+            f"Image data too short for shape ({msg.height}, {total_values_per_row}); got {data.size} values"
+        )
+
+    img = data[:needed_values].reshape((int(msg.height), total_values_per_row))
+    img = img[:, : int(msg.width) * channels]
+
+    if channels == 1:
+        out = img
+    else:
+        out = img.reshape((int(msg.height), int(msg.width), channels))
+
+    if msg.is_bigendian and out.dtype.itemsize > 1:
+        out = out.byteswap().newbyteorder()
+
+    # cv2.imwrite expects BGR/BGRA ordering for color images.
+    if encoding == "rgb8":
+        out = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+    elif encoding == "rgba8":
+        out = cv2.cvtColor(out, cv2.COLOR_RGBA2BGRA)
+
+    return out
+
+
+def center_crop_image(image: np.ndarray, crop_width: int, crop_height: int) -> np.ndarray:
+    image_height, image_width = image.shape[:2]
+    crop_width = max(1, min(int(crop_width), image_width))
+    crop_height = max(1, min(int(crop_height), image_height))
+
+    left = max(0, (image_width - crop_width) // 2)
+    top = max(0, (image_height - crop_height) // 2)
+    return image[top : top + crop_height, left : left + crop_width]
 
 
 @dataclass
@@ -221,10 +286,19 @@ class RawEventWriters:
 
 
 class OfflineExtractor:
-    def __init__(self, profile: Profile, bag_path: Path, output_dir: Path) -> None:
+    def __init__(
+        self,
+        profile: Profile,
+        bag_path: Path,
+        output_dir: Path,
+        progress_callback: Callable[[int, int], None] | None = None,
+        total_pairs_target: int | None = None,
+    ) -> None:
         self.profile = profile
         self.bag_path = bag_path
         self.output_dir = output_dir
+        self.progress_callback = progress_callback
+        self.total_pairs_target = total_pairs_target
 
         self.basler_dir = self.output_dir / "basler"
         self.event_dir = self.output_dir / "event"
@@ -234,14 +308,39 @@ class OfflineExtractor:
         self.window_ns = int(profile.extraction.window_ms * 1_000_000.0)
         self.image_ext = profile.extraction.image_ext.lower().strip(".")
         self.color_mode = profile.extraction.color_mode
+        self.mirror_basler_image = profile.extraction.mirror_basler_image
+        self.mirror_event_image = profile.extraction.mirror_event_image
+        self.crop_basler_image = profile.extraction.crop_basler_image
         self.transparent_bg = profile.extraction.transparent_bg
         self.skip_empty = profile.extraction.skip_empty_windows
         self.max_pairs = profile.extraction.max_pairs
 
+        self.basler_crop_width: int | None = None
+        self.basler_crop_height: int | None = None
+        if self.crop_basler_image:
+            missing_fields = [
+                name
+                for name, value in {
+                    "basler_pixel_pitch_um": profile.extraction.basler_pixel_pitch_um,
+                    "event_pixel_pitch_um": profile.extraction.event_pixel_pitch_um,
+                }.items()
+                if value is None
+            ]
+            if missing_fields:
+                raise ValueError(
+                    "crop_basler_image requires basler_pixel_pitch_um and event_pixel_pitch_um"
+                )
+
+            basler_pitch_um = float(profile.extraction.basler_pixel_pitch_um)
+            event_pitch_um = float(profile.extraction.event_pixel_pitch_um)
+            if basler_pitch_um <= 0.0 or event_pitch_um <= 0.0:
+                raise ValueError("basler_pixel_pitch_um and event_pixel_pitch_um must be positive")
+            self.basler_crop_width = int(round(float(profile.extraction.event_resolution.width) * event_pitch_um / basler_pitch_um))
+            self.basler_crop_height = int(round(float(profile.extraction.event_resolution.height) * event_pitch_um / basler_pitch_um))
+
         if self.image_ext not in {"png", "jpg", "jpeg"}:
             raise ValueError("image_ext must be png, jpg, or jpeg")
 
-        self.bridge = CvBridge()
         self.decoder = Evt3DecoderState(
             width=profile.extraction.event_resolution.width,
             height=profile.extraction.event_resolution.height,
@@ -414,6 +513,7 @@ class OfflineExtractor:
 
         window_start_ns = basler_ns - self.window_ns
         window_end_ns = basler_ns + self.window_ns
+
         t_ns, x, y, p = self.collect_window_events(window_start_ns, window_end_ns)
         event_count = int(t_ns.size)
 
@@ -422,11 +522,18 @@ class OfflineExtractor:
             return
 
         try:
-            basler_img = self.bridge.imgmsg_to_cv2(basler_msg, desired_encoding="passthrough")
+            basler_img = image_msg_to_cv2(basler_msg)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to convert Basler image: {exc}") from exc
 
+        if self.mirror_basler_image:
+            basler_img = cv2.flip(basler_img, 1)
+        if self.crop_basler_image and self.basler_crop_width is not None and self.basler_crop_height is not None:
+            basler_img = center_crop_image(basler_img, self.basler_crop_width, self.basler_crop_height)
+
         event_img = self.render_event_image(x, y, p)
+        if self.mirror_event_image:
+            event_img = cv2.flip(event_img, 1)
 
         ref_ns = int(np.median(t_ns)) if event_count > 0 else basler_ns
         delta_us = (ref_ns - basler_ns) / 1000.0
@@ -458,6 +565,8 @@ class OfflineExtractor:
         )
 
         self.pair_count += 1
+        if self.progress_callback is not None and self.total_pairs_target is not None and self.total_pairs_target > 0:
+            self.progress_callback(self.pair_count, self.total_pairs_target)
         if self.pair_count % 50 == 0:
             self.pairs_csv_file.flush()
 
@@ -512,7 +621,26 @@ class OfflineExtractor:
         return summary
 
 
-def run_extraction(profile: Profile, bag_path: Path, output_dir: Path | None = None) -> tuple[Path, dict[str, int]]:
+def _count_topic_messages(profile: Profile, bag_path: Path, topic_name: str) -> int:
+    reader = SequentialReader()
+    storage_options = StorageOptions(uri=str(bag_path), storage_id=profile.capture.storage_id)
+    converter_options = ConverterOptions("", "")
+    reader.open(storage_options, converter_options)
+
+    count = 0
+    while reader.has_next():
+        topic, _, _ = reader.read_next()
+        if topic == topic_name:
+            count += 1
+    return count
+
+
+def run_extraction(
+    profile: Profile,
+    bag_path: Path,
+    output_dir: Path | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> tuple[Path, dict[str, int]]:
     bag_path = bag_path.expanduser().resolve()
     if not (bag_path / "metadata.yaml").exists():
         raise RuntimeError(f"Bag path is missing metadata.yaml: {bag_path}")
@@ -522,7 +650,18 @@ def run_extraction(profile: Profile, bag_path: Path, output_dir: Path | None = N
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    extractor = OfflineExtractor(profile=profile, bag_path=bag_path, output_dir=output_dir)
+    total_basler_frames = _count_topic_messages(profile, bag_path, profile.topics.basler_image)
+    total_pairs_target = total_basler_frames
+    if profile.extraction.max_pairs > 0:
+        total_pairs_target = min(total_pairs_target, profile.extraction.max_pairs)
+
+    extractor = OfflineExtractor(
+        profile=profile,
+        bag_path=bag_path,
+        output_dir=output_dir,
+        progress_callback=progress_callback,
+        total_pairs_target=total_pairs_target,
+    )
     try:
         extractor.run()
     finally:

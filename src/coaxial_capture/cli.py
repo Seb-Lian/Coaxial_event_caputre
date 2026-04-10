@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import shlex
+import subprocess
 from pathlib import Path
 
 from .capture import capture_status, start_capture, stop_capture
@@ -48,11 +50,67 @@ def _extract_run(args: argparse.Namespace) -> int:
     profile = load_profile(args.profile)
     bag_path = Path(args.bag_path).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else None
-    out_path, summary = run_extraction(profile, bag_path=bag_path, output_dir=output_dir)
+
+    def _on_progress(done_pairs: int, total_pairs: int) -> None:
+        pct = 100.0 * float(done_pairs) / float(total_pairs) if total_pairs > 0 else 100.0
+        print(f"pair_created={done_pairs}/{total_pairs} ({pct:.1f}%)")
+
+    out_path, summary = run_extraction(
+        profile,
+        bag_path=bag_path,
+        output_dir=output_dir,
+        progress_callback=_on_progress,
+    )
     print(f"Extraction output: {out_path}")
     for key, value in summary.items():
         print(f"{key}={value}")
     return 0
+
+
+def _print_mcap_info(bag_dir: Path, ros_setup: Path) -> None:
+    mcap_files = sorted(bag_dir.glob("*.mcap"))
+    if not mcap_files:
+        print(f"No MCAP files found in {bag_dir}")
+        return
+
+    for mcap_file in mcap_files:
+        print(f"mcap info: {mcap_file}")
+        try:
+            completed = subprocess.run(  # noqa: S603
+                ["mcap", "info", str(mcap_file)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            print("Unable to run 'mcap info': mcap CLI not found in PATH")
+            print(f"ros2 bag info: {bag_dir}")
+            ros_cmd = (
+                f"source {shlex.quote(str(ros_setup))} && "
+                f"ros2 bag info {shlex.quote(str(bag_dir))}"
+            )
+            fallback = subprocess.run(  # noqa: S603
+                ["bash", "-lc", ros_cmd],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if fallback.returncode == 0:
+                output = fallback.stdout.strip()
+                if output:
+                    print(output)
+            else:
+                error_text = fallback.stderr.strip() or fallback.stdout.strip() or "unknown error"
+                print(f"Unable to run 'ros2 bag info' for {bag_dir}: {error_text}")
+            return
+
+        if completed.returncode == 0:
+            output = completed.stdout.strip()
+            if output:
+                print(output)
+        else:
+            error_text = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+            print(f"Unable to read MCAP metadata for {mcap_file}: {error_text}")
 
 
 def _ui_run(args: argparse.Namespace) -> int:
@@ -78,6 +136,7 @@ def _ui_run(args: argparse.Namespace) -> int:
             elif choice == "2":
                 bag_dir = stop_capture(profile)
                 print(f"Capture stopped. Bag output: {bag_dir}")
+                _print_mcap_info(bag_dir, profile.ros.setup)
             elif choice == "3":
                 status, rows, bag_dir = capture_status(profile)
                 print(f"status={status}")
@@ -91,7 +150,17 @@ def _ui_run(args: argparse.Namespace) -> int:
                 bag_input = input("Bag path: ").strip()
                 out_input = input("Output dir (optional): ").strip()
                 out_dir = Path(out_input).expanduser().resolve() if out_input else None
-                out_path, summary = run_extraction(profile, bag_path=Path(bag_input).expanduser().resolve(), output_dir=out_dir)
+
+                def _on_progress(done_pairs: int, total_pairs: int) -> None:
+                    pct = 100.0 * float(done_pairs) / float(total_pairs) if total_pairs > 0 else 100.0
+                    print(f"pair_created={done_pairs}/{total_pairs} ({pct:.1f}%)")
+
+                out_path, summary = run_extraction(
+                    profile,
+                    bag_path=Path(bag_input).expanduser().resolve(),
+                    output_dir=out_dir,
+                    progress_callback=_on_progress,
+                )
                 print(f"Extraction output: {out_path}")
                 for key, value in summary.items():
                     print(f"{key}={value}")

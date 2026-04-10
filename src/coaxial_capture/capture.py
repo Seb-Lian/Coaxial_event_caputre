@@ -64,6 +64,38 @@ def _assert_process_alive(pid: int, name: str, log_path: Path) -> None:
     raise RuntimeError(f"Process '{name}' exited during startup.{details}")
 
 
+def _topic_has_message(profile: Profile, topic: str, timeout_sec: int) -> bool:
+    if timeout_sec <= 0:
+        return True
+
+    safe_topic = shlex.quote(topic)
+    shell_cmd = (
+        f"source {shlex.quote(str(profile.ros.setup))} && "
+        f"timeout {int(timeout_sec)}s ros2 topic echo --once {safe_topic} >/dev/null 2>&1"
+    )
+    completed = subprocess.run(  # noqa: S603
+        ["bash", "-lc", shell_cmd],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _warn_if_silent_topics(profile: Profile, topics: list[str], timeout_sec: int, log_dir: Path) -> None:
+    if timeout_sec <= 0:
+        return
+
+    silent_topics = [topic for topic in topics if not _topic_has_message(profile, topic, timeout_sec)]
+    if not silent_topics:
+        return
+
+    print("WARNING: recording started, but no messages were observed on:")
+    for topic in silent_topics:
+        print(f"  - {topic}")
+    print(f"Checked each topic for up to {timeout_sec}s. Please inspect driver logs in {log_dir}")
+
+
 def start_capture(profile: Profile, output_dir: Path | None = None) -> Path:
     ensure_profile_dirs(profile)
     state_path = _state_path(profile)
@@ -119,6 +151,11 @@ def start_capture(profile: Profile, output_dir: Path | None = None) -> Path:
         bag_record = launch_process("bag_record", profile.ros.setup, record_cmd, log_dir)
         records.append(bag_record)
         _assert_process_alive(bag_record.pid, bag_record.name, Path(bag_record.log_path))
+
+        health_topics = [profile.topics.event_packets, profile.topics.basler_image]
+        if profile.capture.include_renderer_topic:
+            health_topics.append(profile.topics.event_image)
+        _warn_if_silent_topics(profile, health_topics, profile.capture.startup_message_check_sec, log_dir)
 
         state = SessionState(
             profile_name=profile.name,

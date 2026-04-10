@@ -49,6 +49,7 @@ def launch_process(name: str, ros_setup: Path, command: str, log_dir: Path) -> P
     with log_path.open("ab") as log_handle:
         proc = subprocess.Popen(  # noqa: S603
             ["bash", "-lc", shell_cmd],
+            stdin=subprocess.DEVNULL,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,

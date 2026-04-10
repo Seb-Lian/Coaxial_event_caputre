@@ -20,6 +20,7 @@ class PathsConfig:
 class CaptureConfig:
     storage_id: str
     wait_topics_sec: int
+    startup_message_check_sec: int
     include_renderer_topic: bool
     launch_renderer: bool
     launch_basler: bool
@@ -47,6 +48,11 @@ class ExtractionConfig:
     window_ms: float
     image_ext: str
     color_mode: str
+    mirror_basler_image: bool
+    mirror_event_image: bool
+    crop_basler_image: bool
+    basler_pixel_pitch_um: float | None
+    event_pixel_pitch_um: float | None
     transparent_bg: bool
     skip_empty_windows: bool
     max_pairs: int
@@ -83,6 +89,20 @@ def _required(data: dict[str, Any], key: str) -> Any:
     return data[key]
 
 
+def _optional_int(data: dict[str, Any], key: str) -> int | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    return int(value)
+
+
+def _optional_float(data: dict[str, Any], key: str) -> float | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    return float(value)
+
+
 def load_profile(profile_path: str | Path) -> Profile:
     path = _to_path(profile_path)
     with path.open("r", encoding="utf-8") as handle:
@@ -113,6 +133,7 @@ def load_profile(profile_path: str | Path) -> Profile:
         capture=CaptureConfig(
             storage_id=str(_required(capture, "storage_id")),
             wait_topics_sec=int(_required(capture, "wait_topics_sec")),
+            startup_message_check_sec=int(capture.get("startup_message_check_sec", 2)),
             include_renderer_topic=bool(_required(capture, "include_renderer_topic")),
             launch_renderer=bool(_required(capture, "launch_renderer")),
             launch_basler=bool(_required(capture, "launch_basler")),
@@ -130,6 +151,11 @@ def load_profile(profile_path: str | Path) -> Profile:
             window_ms=float(_required(extraction, "window_ms")),
             image_ext=str(_required(extraction, "image_ext")),
             color_mode=str(_required(extraction, "color_mode")),
+            mirror_basler_image=bool(extraction.get("mirror_basler_image", False)),
+            mirror_event_image=bool(extraction.get("mirror_event_image", False)),
+            crop_basler_image=bool(extraction.get("crop_basler_image", False)),
+            basler_pixel_pitch_um=_optional_float(extraction, "basler_pixel_pitch_um"),
+            event_pixel_pitch_um=_optional_float(extraction, "event_pixel_pitch_um"),
             transparent_bg=bool(_required(extraction, "transparent_bg")),
             skip_empty_windows=bool(_required(extraction, "skip_empty_windows")),
             max_pairs=int(_required(extraction, "max_pairs")),

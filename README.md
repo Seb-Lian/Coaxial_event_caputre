@@ -31,6 +31,8 @@ docker compose up -d --build
 
 ```bash
 docker exec -it ros2_jazzy_coaxial_capture bash
+source /opt/ros/jazzy/setup.bash
+export PYTHONPATH=/workspace/src:${PYTHONPATH:-}
 ```
 
 5. Run capture CLI:
@@ -65,6 +67,29 @@ python3 -m coaxial_capture.cli extract run \
 python3 -m coaxial_capture.cli ui run --profile /workspace/config/profiles/default.yaml
 ```
 
+## Host Network Setup
+
+The Basler camera path expects jumbo frames on the host interface that is connected to the camera. In this setup that interface is `eno1`.
+
+Set it for the current boot:
+
+```bash
+sudo ip link set dev eno1 down
+sudo ip link set dev eno1 mtu 8192
+sudo ip link set dev eno1 up
+ip -br link show eno1
+```
+
+If you use NetworkManager and want the setting to survive reboots, find the active connection name first and then update its MTU:
+
+```bash
+nmcli connection show --active
+sudo nmcli connection modify "<connection-name>" 802-3-ethernet.mtu 8192
+sudo nmcli connection up "<connection-name>"
+```
+
+After changing the host MTU, restart the capture container so the camera driver reconnects cleanly.
+
 ## Output Artifacts
 
 Capture output directory:
@@ -86,7 +111,16 @@ Extraction output directory:
 - `capture.event_renderer_launch`: Renderer launch command.
 - `capture.basler_launch`: Basler launch helper command.
 - `capture.wait_topics_sec`: Timeout before recording starts.
+- `capture.startup_message_check_sec`: After recording starts, probes key topics for a first message and warns if one feed is silent.
+- `config/basler/my_camera.yaml` transport knobs:
+  `inter_pkg_delay` (lower for higher FPS), `frame_transmission_delay` (keep at 0 for single camera), and launch `--mtu-size` should match host NIC MTU.
+- For throughput consistency, prefer `--startup-user-set Default` instead of `CurrentSetting` in `capture.basler_launch` to avoid hidden camera-side persisted limits.
+- In `basler_launch_helper.sh`, `--enable-status-publisher false` and `--enable-current-params-publisher false` reduce wrapper overhead.
 - Default capture records raw event packets only (`capture.launch_renderer: false`, `capture.include_renderer_topic: false`).
+- `extraction.mirror_basler_image`: Mirror Basler frames horizontally before saving during offline extraction.
+- `extraction.mirror_event_image`: Mirror rendered event frames horizontally before saving during offline extraction.
+- `extraction.crop_basler_image`: Center-crop Basler frames before saving during offline extraction.
+- If cropping is enabled, set `basler_pixel_pitch_um` and `event_pixel_pitch_um` to the effective pixel pitches after any binning. The crop is computed as $w_c = \mathrm{round}(R_e^w \cdot p_e / p_b)$ and $h_c = \mathrm{round}(R_e^h \cdot p_e / p_b)$, where $R_e$ is the event sensor resolution and $p$ is pixel pitch in micrometers.
 - `extraction.window_ms`: Event window half-width around each Basler frame timestamp.
 
 ## Notes
