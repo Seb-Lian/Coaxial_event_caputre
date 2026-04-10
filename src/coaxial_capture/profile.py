@@ -24,6 +24,7 @@ class CaptureConfig:
     include_renderer_topic: bool
     launch_renderer: bool
     launch_basler: bool
+    basler_enable_chunk_timestamp: bool
     event_driver_launch: str
     event_renderer_launch: str
     basler_launch: str
@@ -53,6 +54,7 @@ class ExtractionConfig:
     crop_basler_image: bool
     basler_pixel_pitch_um: float | None
     event_pixel_pitch_um: float | None
+    drop_leading_empty_windows: bool
     transparent_bg: bool
     skip_empty_windows: bool
     max_pairs: int
@@ -137,6 +139,7 @@ def load_profile(profile_path: str | Path) -> Profile:
             include_renderer_topic=bool(_required(capture, "include_renderer_topic")),
             launch_renderer=bool(_required(capture, "launch_renderer")),
             launch_basler=bool(_required(capture, "launch_basler")),
+            basler_enable_chunk_timestamp=bool(capture.get("basler_enable_chunk_timestamp", False)),
             event_driver_launch=str(_required(capture, "event_driver_launch")),
             event_renderer_launch=str(_required(capture, "event_renderer_launch")),
             basler_launch=str(_required(capture, "basler_launch")),
@@ -156,6 +159,7 @@ def load_profile(profile_path: str | Path) -> Profile:
             crop_basler_image=bool(extraction.get("crop_basler_image", False)),
             basler_pixel_pitch_um=_optional_float(extraction, "basler_pixel_pitch_um"),
             event_pixel_pitch_um=_optional_float(extraction, "event_pixel_pitch_um"),
+            drop_leading_empty_windows=bool(extraction.get("drop_leading_empty_windows", True)),
             transparent_bg=bool(_required(extraction, "transparent_bg")),
             skip_empty_windows=bool(_required(extraction, "skip_empty_windows")),
             max_pairs=int(_required(extraction, "max_pairs")),

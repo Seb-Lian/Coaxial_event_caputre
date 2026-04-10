@@ -3,7 +3,7 @@
     camera_id: my_camera
     binning_x: 1
     binning_y: 1
-    frame_rate: 48.0
+    frame_rate: 30.0
     exposure: 4000.0
     gain: 0.0
     inter_pkg_delay: 0

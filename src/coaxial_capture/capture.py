@@ -96,6 +96,47 @@ def _warn_if_silent_topics(profile: Profile, topics: list[str], timeout_sec: int
     print(f"Checked each topic for up to {timeout_sec}s. Please inspect driver logs in {log_dir}")
 
 
+def _basler_service_prefix(profile: Profile) -> str:
+    topic = profile.topics.basler_image.rstrip("/")
+    if topic.endswith("/image_raw"):
+        return topic[: -len("/image_raw")]
+    return "/my_camera/pylon_ros2_camera_node"
+
+
+def _configure_basler_chunk_timestamp(profile: Profile) -> None:
+    if not profile.capture.launch_basler or not profile.capture.basler_enable_chunk_timestamp:
+        return
+
+    prefix = _basler_service_prefix(profile)
+
+    # Enable chunk mode + timestamp chunk so image header stamps use acquisition time.
+    commands = [
+        (
+            f"ros2 service call {shlex.quote(prefix + '/set_chunk_mode_active')} "
+            "std_srvs/srv/SetBool \"{data: true}\""
+        ),
+        (
+            f"ros2 service call {shlex.quote(prefix + '/set_chunk_selector')} "
+            "pylon_ros2_camera_interfaces/srv/SetIntegerValue \"{value: 29}\""
+        ),
+        (
+            f"ros2 service call {shlex.quote(prefix + '/set_chunk_enable')} "
+            "std_srvs/srv/SetBool \"{data: true}\""
+        ),
+        (
+            f"ros2 service call {shlex.quote(prefix + '/get_chunk_mode_active')} "
+            "pylon_ros2_camera_interfaces/srv/GetIntegerValue \"{}\""
+        ),
+        (
+            f"ros2 service call {shlex.quote(prefix + '/get_chunk_enable')} "
+            "pylon_ros2_camera_interfaces/srv/GetIntegerValue \"{}\""
+        ),
+    ]
+
+    for command in commands:
+        _run_ros_command(profile, command)
+
+
 def start_capture(profile: Profile, output_dir: Path | None = None) -> Path:
     ensure_profile_dirs(profile)
     state_path = _state_path(profile)
@@ -138,6 +179,12 @@ def start_capture(profile: Profile, output_dir: Path | None = None) -> Path:
             topics.append(profile.topics.event_image)
 
         _wait_for_topics(profile, topics, profile.capture.wait_topics_sec)
+
+        if profile.capture.launch_basler and profile.capture.basler_enable_chunk_timestamp:
+            try:
+                _configure_basler_chunk_timestamp(profile)
+            except Exception as exc:  # noqa: BLE001
+                print(f"WARNING: failed to enable Basler chunk timestamp mode: {exc}")
 
         bag_topics = [profile.topics.event_packets, profile.topics.basler_image, profile.topics.basler_info]
         if profile.capture.include_renderer_topic:

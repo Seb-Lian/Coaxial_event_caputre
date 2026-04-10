@@ -17,10 +17,11 @@ capture:
   include_renderer_topic: false
   launch_renderer: false
   launch_basler: true
+  basler_enable_chunk_timestamp: false
   startup_message_check_sec: 2
   event_driver_launch: "ros2 launch /workspace/scripts/metavision_driver_composition_with_bias.launch.py serial:=00051466 bias_file:=/workspace/config/event_camera/my_camera.bias"
   event_renderer_launch: "ros2 launch event_camera_renderer renderer.launch.py"
-  basler_launch: "/workspace/scripts/basler_launch_helper.sh --config-file /workspace/config/basler/my_camera.yaml --camera-id my_camera --startup-user-set Default --mtu-size 8192 --enable-status-publisher false --enable-current-params-publisher false"
+  basler_launch: "/workspace/scripts/basler_launch_helper.sh --config-file /workspace/config/basler/my_camera.yaml --camera-id my_camera --startup-user-set CurrentSetting --mtu-size 8192 --enable-status-publisher false --enable-current-params-publisher false"
 
 topics:
   event_packets: /event_camera/events
@@ -29,7 +30,7 @@ topics:
   basler_info: /my_camera/pylon_ros2_camera_node/camera_info
 
 extraction:
-  window_ms: 12.0
+  window_ms: 5.0
   image_ext: png
   color_mode: blue-red
   mirror_basler_image: false
@@ -37,6 +38,7 @@ extraction:
   crop_basler_image: false
   basler_pixel_pitch_um: 5.3
   event_pixel_pitch_um: 4.8
+  drop_leading_empty_windows: true
   transparent_bg: true
   skip_empty_windows: false
   max_pairs: 0

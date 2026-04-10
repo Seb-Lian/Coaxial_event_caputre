@@ -110,17 +110,19 @@ Extraction output directory:
 - `capture.event_driver_launch`: EVK4 driver launch command.
 - `capture.event_renderer_launch`: Renderer launch command.
 - `capture.basler_launch`: Basler launch helper command.
+- `capture.basler_enable_chunk_timestamp`: If true, capture startup calls Basler chunk services so `image_raw.header.stamp` uses acquisition timestamp (when camera supports chunk timestamp).
 - `capture.wait_topics_sec`: Timeout before recording starts.
 - `capture.startup_message_check_sec`: After recording starts, probes key topics for a first message and warns if one feed is silent.
 - `config/basler/my_camera.yaml` transport knobs:
   `inter_pkg_delay` (lower for higher FPS), `frame_transmission_delay` (keep at 0 for single camera), and launch `--mtu-size` should match host NIC MTU.
-- For throughput consistency, prefer `--startup-user-set Default` instead of `CurrentSetting` in `capture.basler_launch` to avoid hidden camera-side persisted limits.
+- `--startup-user-set Default` is best for reproducible throughput. If alignment regresses, keep `Default` and enable `capture.basler_enable_chunk_timestamp: true` rather than switching back to `CurrentSetting`.
 - In `basler_launch_helper.sh`, `--enable-status-publisher false` and `--enable-current-params-publisher false` reduce wrapper overhead.
 - Default capture records raw event packets only (`capture.launch_renderer: false`, `capture.include_renderer_topic: false`).
 - `extraction.mirror_basler_image`: Mirror Basler frames horizontally before saving during offline extraction.
 - `extraction.mirror_event_image`: Mirror rendered event frames horizontally before saving during offline extraction.
 - `extraction.crop_basler_image`: Center-crop Basler frames before saving during offline extraction.
 - If cropping is enabled, set `basler_pixel_pitch_um` and `event_pixel_pitch_um` to the effective pixel pitches after any binning. The crop is computed as $w_c = \mathrm{round}(R_e^w \cdot p_e / p_b)$ and $h_c = \mathrm{round}(R_e^h \cdot p_e / p_b)$, where $R_e$ is the event sensor resolution and $p$ is pixel pitch in micrometers.
+- `extraction.drop_leading_empty_windows`: Drops startup Basler frames that have zero events so extraction begins at the first event-supported pair.
 - `extraction.window_ms`: Event window half-width around each Basler frame timestamp.
 
 ## Notes

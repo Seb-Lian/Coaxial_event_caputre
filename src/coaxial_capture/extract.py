@@ -21,6 +21,11 @@ def stamp_to_ns(msg: Image) -> int:
     return int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
 
 
+def choose_time_ns(preferred_ns: int, fallback_ns: int) -> int:
+    # Bag timestamps keep all topics on one recorder time base.
+    return int(preferred_ns) if int(preferred_ns) > 0 else int(fallback_ns)
+
+
 def image_msg_to_cv2(msg: Image) -> np.ndarray:
     encoding = msg.encoding.lower().strip()
     if not encoding:
@@ -313,6 +318,7 @@ class OfflineExtractor:
         self.crop_basler_image = profile.extraction.crop_basler_image
         self.transparent_bg = profile.extraction.transparent_bg
         self.skip_empty = profile.extraction.skip_empty_windows
+        self.drop_leading_empty_windows = profile.extraction.drop_leading_empty_windows
         self.max_pairs = profile.extraction.max_pairs
 
         self.basler_crop_width: int | None = None
@@ -354,6 +360,7 @@ class OfflineExtractor:
         self.basler_seen = 0
         self.event_packets_seen = 0
         self.empty_windows = 0
+        self.leading_empty_windows = 0
 
         self.pairs_csv_path = self.output_dir / "pairs.csv"
         self.pairs_csv_file = self.pairs_csv_path.open("w", newline="", encoding="utf-8")
@@ -378,7 +385,7 @@ class OfflineExtractor:
             write_hdf5=profile.extraction.raw_events_hdf5,
         )
 
-    def add_event_packet(self, msg: EventPacket) -> None:
+    def add_event_packet(self, msg: EventPacket, bag_ts_ns: int) -> None:
         self.event_packets_seen += 1
         chunk = self.decoder.decode_packet(msg)
         if chunk is None:
@@ -387,7 +394,8 @@ class OfflineExtractor:
             return
 
         header_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
-        packet_offset_ns = header_ns - chunk.t_max_ns
+        packet_anchor_ns = choose_time_ns(bag_ts_ns, header_ns)
+        packet_offset_ns = packet_anchor_ns - chunk.t_max_ns
         chunk.t_ns = chunk.t_ns + packet_offset_ns
         chunk.t_min_ns += packet_offset_ns
         chunk.t_max_ns += packet_offset_ns
@@ -400,8 +408,9 @@ class OfflineExtractor:
         self.process_pending(flush=False)
         self.prune_chunks()
 
-    def add_basler_image(self, msg: Image) -> None:
-        ts_ns = stamp_to_ns(msg)
+    def add_basler_image(self, msg: Image, bag_ts_ns: int) -> None:
+        header_ns = stamp_to_ns(msg)
+        ts_ns = choose_time_ns(bag_ts_ns, header_ns)
         self.pending_basler.append((msg, ts_ns))
         self.basler_seen += 1
 
@@ -517,6 +526,10 @@ class OfflineExtractor:
         t_ns, x, y, p = self.collect_window_events(window_start_ns, window_end_ns)
         event_count = int(t_ns.size)
 
+        if event_count == 0 and self.drop_leading_empty_windows and self.pair_count == 0:
+            self.leading_empty_windows += 1
+            return
+
         if event_count == 0 and self.skip_empty:
             self.empty_windows += 1
             return
@@ -586,13 +599,13 @@ class OfflineExtractor:
             raise RuntimeError(f"Missing event topic in bag: {event_topic}")
 
         while reader.has_next():
-            topic, serialized_data, _ = reader.read_next()
+            topic, serialized_data, bag_ts_ns = reader.read_next()
             if topic == event_topic:
                 msg = deserialize_message(serialized_data, EventPacket)
-                self.add_event_packet(msg)
+                self.add_event_packet(msg, bag_ts_ns)
             elif topic == basler_topic:
                 msg = deserialize_message(serialized_data, Image)
-                self.add_basler_image(msg)
+                self.add_basler_image(msg, bag_ts_ns)
 
             if self.max_pairs > 0 and self.pair_count >= self.max_pairs:
                 break
@@ -609,6 +622,7 @@ class OfflineExtractor:
             "basler_frames_seen": self.basler_seen,
             "event_packets_seen": self.event_packets_seen,
             "empty_windows_skipped": self.empty_windows,
+            "leading_empty_windows_skipped": self.leading_empty_windows,
         }
 
         summary_path = self.output_dir / "summary.csv"
