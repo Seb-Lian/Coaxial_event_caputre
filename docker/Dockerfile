@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     x11-apps \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --no-cache-dir --break-system-packages colcon-common-extensions
+RUN python3 -m pip install --no-cache-dir --break-system-packages colcon-common-extensions "empy==3.3.4"
 
 RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key | gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \

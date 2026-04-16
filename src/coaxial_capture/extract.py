@@ -22,7 +22,7 @@ def stamp_to_ns(msg: Image) -> int:
 
 
 def choose_time_ns(preferred_ns: int, fallback_ns: int) -> int:
-    # Bag timestamps keep all topics on one recorder time base.
+    # Returns preferred_ns when positive, otherwise falls back to fallback_ns.
     return int(preferred_ns) if int(preferred_ns) > 0 else int(fallback_ns)
 
 
@@ -394,7 +394,13 @@ class OfflineExtractor:
             return
 
         header_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
-        packet_anchor_ns = choose_time_ns(bag_ts_ns, header_ns)
+        # Prefer the driver's header timestamp over the recorder's bag timestamp.
+        # Under CPU throttling the recorder receives messages with variable DDS
+        # transport delay that differs per packet, which corrupts the anchor and
+        # causes chunks to land at wrong (and potentially out-of-order) absolute
+        # times.  The driver sets header.stamp much closer to event-hardware time
+        # and is not affected by recorder-side scheduling jitter.
+        packet_anchor_ns = choose_time_ns(header_ns, bag_ts_ns)
         packet_offset_ns = packet_anchor_ns - chunk.t_max_ns
         chunk.t_ns = chunk.t_ns + packet_offset_ns
         chunk.t_min_ns += packet_offset_ns
@@ -403,14 +409,19 @@ class OfflineExtractor:
         self.raw_writer.append(chunk.t_ns, chunk.x, chunk.y, chunk.p)
 
         self.event_chunks.append(chunk)
-        self.latest_event_ns = chunk.t_max_ns
+        # Track the highest timestamp seen, not just the most-recently-processed
+        # chunk.  If a jittered chunk arrives with a lower t_max_ns than the
+        # previous one, process_pending's guard must not regress.
+        self.latest_event_ns = max(self.latest_event_ns or 0, chunk.t_max_ns)
 
         self.process_pending(flush=False)
         self.prune_chunks()
 
     def add_basler_image(self, msg: Image, bag_ts_ns: int) -> None:
         header_ns = stamp_to_ns(msg)
-        ts_ns = choose_time_ns(bag_ts_ns, header_ns)
+        # Prefer driver/hardware header timestamp for the same reason as event
+        # packets: recorder-side jitter is higher under CPU throttling.
+        ts_ns = choose_time_ns(header_ns, bag_ts_ns)
         self.pending_basler.append((msg, ts_ns))
         self.basler_seen += 1
 
@@ -455,8 +466,12 @@ class OfflineExtractor:
         for chunk in self.event_chunks:
             if chunk.t_max_ns < start_ns:
                 continue
+            # Use continue rather than break: under CPU throttling chunks may
+            # arrive slightly out of temporal order, so a chunk with
+            # t_min_ns > end_ns does not guarantee all later chunks are also
+            # outside the window.
             if chunk.t_min_ns > end_ns:
-                break
+                continue
 
             mask = (chunk.t_ns >= start_ns) & (chunk.t_ns <= end_ns)
             if np.any(mask):
@@ -471,12 +486,15 @@ class OfflineExtractor:
             empty_u8 = np.asarray([], dtype=np.uint8)
             return empty_i64, empty_i32, empty_i32, empty_u8
 
-        return (
-            np.concatenate(t_parts),
-            np.concatenate(x_parts),
-            np.concatenate(y_parts),
-            np.concatenate(p_parts),
-        )
+        t_all = np.concatenate(t_parts)
+        x_all = np.concatenate(x_parts)
+        y_all = np.concatenate(y_parts)
+        p_all = np.concatenate(p_parts)
+
+        # Sort by timestamp so the output is always temporally ordered
+        # regardless of what order chunks were inserted.
+        order = np.argsort(t_all, kind="stable")
+        return t_all[order], x_all[order], y_all[order], p_all[order]
 
     def render_event_image(self, x: np.ndarray, y: np.ndarray, p: np.ndarray) -> np.ndarray:
         width = max(1, self.decoder.width)
