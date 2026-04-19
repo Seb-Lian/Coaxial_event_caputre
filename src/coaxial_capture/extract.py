@@ -393,15 +393,15 @@ class OfflineExtractor:
             self.prune_chunks()
             return
 
-        header_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+        header_ns = stamp_to_ns(msg)
         # Prefer the driver's header timestamp over the recorder's bag timestamp.
         # Under CPU throttling the recorder receives messages with variable DDS
         # transport delay that differs per packet, which corrupts the anchor and
         # causes chunks to land at wrong (and potentially out-of-order) absolute
         # times.  The driver sets header.stamp much closer to event-hardware time
         # and is not affected by recorder-side scheduling jitter.
-        packet_anchor_ns = choose_time_ns(header_ns, bag_ts_ns)
-        packet_offset_ns = packet_anchor_ns - chunk.t_max_ns
+        # packet_anchor_ns = choose_time_ns(bag_ts_ns, header_ns)
+        packet_offset_ns = bag_ts_ns - chunk.t_max_ns
         chunk.t_ns = chunk.t_ns + packet_offset_ns
         chunk.t_min_ns += packet_offset_ns
         chunk.t_max_ns += packet_offset_ns
@@ -421,7 +421,8 @@ class OfflineExtractor:
         header_ns = stamp_to_ns(msg)
         # Prefer driver/hardware header timestamp for the same reason as event
         # packets: recorder-side jitter is higher under CPU throttling.
-        ts_ns = choose_time_ns(header_ns, bag_ts_ns)
+        # ts_ns = choose_time_ns(bag_ts_ns, header_ns)
+        ts_ns = bag_ts_ns
         self.pending_basler.append((msg, ts_ns))
         self.basler_seen += 1
 
@@ -450,6 +451,14 @@ class OfflineExtractor:
             if not flush:
                 if self.latest_event_ns is None or self.latest_event_ns < window_end_ns:
                     break
+
+            # Skip until event stream has caught up to Basler
+            if self.latest_event_ns is not None:
+                startup_diff_ms = (basler_ns - self.latest_event_ns) / 1_000_000
+                if startup_diff_ms > 100:  # more than 100ms behind
+                    self.pending_basler.popleft()
+                    self.leading_empty_windows += 1
+                    continue
 
             self.pending_basler.popleft()
             self.save_pair(basler_msg, basler_ns)
@@ -575,6 +584,17 @@ class OfflineExtractor:
 
         basler_path = self.basler_dir / basler_name
         event_path = self.event_dir / event_name
+
+                # In save_pair, add temporarily at the top:
+        if self.pair_count < 0:
+            print(f"pair {self.pair_count}:")
+            print(f"  basler_ns:    {basler_ns}")
+            print(f"  window_start: {basler_ns - self.window_ns}")
+            print(f"  window_end:   {basler_ns + self.window_ns}")
+            if event_count > 0:
+                print(f"  t_ns min:     {t_ns.min()}")
+                print(f"  t_ns max:     {t_ns.max()}")
+                print(f"  t_ns median:  {int(np.median(t_ns))}")
 
         if not cv2.imwrite(str(basler_path), basler_img):
             raise RuntimeError(f"Failed writing {basler_path}")

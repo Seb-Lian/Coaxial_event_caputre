@@ -10,12 +10,16 @@ def generate_launch_description() -> LaunchDescription:
     camera_name = LaunchConfiguration("camera_name")
     serial = LaunchConfiguration("serial")
     bias_file = LaunchConfiguration("bias_file")
+    erc_mode = LaunchConfiguration("erc_mode")
+    erc_rate = LaunchConfiguration("erc_rate")
 
     return LaunchDescription(
         [
             DeclareLaunchArgument("camera_name", default_value="event_camera"),
             DeclareLaunchArgument("serial", default_value="00051466"),
             DeclareLaunchArgument("bias_file", default_value="/workspace/config/event_camera/my_camera.bias"),
+            DeclareLaunchArgument("erc_mode", default_value="na"),
+            DeclareLaunchArgument("erc_rate", default_value="100000000"),
             ComposableNodeContainer(
                 name="metavision_driver_container",
                 namespace="",
@@ -31,8 +35,10 @@ def generate_launch_description() -> LaunchDescription:
                             {
                                 "serial": ParameterValue(serial, value_type=str),
                                 "bias_file": ParameterValue(bias_file, value_type=str),
-                                "use_multithreading": False,
+                                "use_multithreading": True,
                                 "event_message_time_threshold": 1.0e-3,
+                                "erc_mode": ParameterValue(erc_mode, value_type=str),
+                                "erc_rate": ParameterValue(erc_rate, value_type=int),
                             }
                         ],
                         extra_arguments=[{"use_intra_process_comms": True}],
