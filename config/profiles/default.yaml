@@ -19,9 +19,9 @@ capture:
   launch_basler: true
   basler_enable_chunk_timestamp: false
   startup_message_check_sec: 2
-  event_driver_launch: "ros2 launch /workspace/scripts/metavision_driver_composition_with_bias.launch.py serial:=00051466 erc_mode:=enabled erc_rate:=2000000 bias_file:=/workspace/config/event_camera/my_camera.bias"
+  event_driver_launch: "ros2 launch /workspace/scripts/metavision_driver_composition_with_bias.launch.py serial:=00051466 erc_mode:=enabled erc_rate:=5000000 bias_file:=/workspace/config/event_camera/my_camera.bias"
   event_renderer_launch: "ros2 launch event_camera_renderer renderer.launch.py"
-  basler_launch: "/workspace/scripts/basler_launch_helper.sh --config-file /workspace/config/basler/my_camera.yaml --camera-id my_camera --startup-user-set Default --mtu-size 8192 --enable-status-publisher false --enable-current-params-publisher false"
+  basler_launch: "/workspace/scripts/basler_launch_helper.sh --config-file /workspace/config/basler/my_camera.yaml --camera-id my_camera --startup-user-set CurrentSetting --mtu-size 8192 --enable-status-publisher false --enable-current-params-publisher false"
 
 topics:
   event_packets: /event_camera/events
@@ -44,7 +44,7 @@ extraction:
   max_pairs: 0
   output_subdir: synced_pairs
   raw_events_csv: false
-  raw_events_hdf5: false
+  raw_events_hdf5: true
   event_resolution:
     width: 1280
     height: 720

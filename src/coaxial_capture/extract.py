@@ -401,7 +401,7 @@ class OfflineExtractor:
         # times.  The driver sets header.stamp much closer to event-hardware time
         # and is not affected by recorder-side scheduling jitter.
         # packet_anchor_ns = choose_time_ns(bag_ts_ns, header_ns)
-        packet_offset_ns = bag_ts_ns - chunk.t_max_ns
+        packet_offset_ns = header_ns - chunk.t_max_ns
         chunk.t_ns = chunk.t_ns + packet_offset_ns
         chunk.t_min_ns += packet_offset_ns
         chunk.t_max_ns += packet_offset_ns
@@ -422,7 +422,7 @@ class OfflineExtractor:
         # Prefer driver/hardware header timestamp for the same reason as event
         # packets: recorder-side jitter is higher under CPU throttling.
         # ts_ns = choose_time_ns(bag_ts_ns, header_ns)
-        ts_ns = bag_ts_ns
+        ts_ns = header_ns
         self.pending_basler.append((msg, ts_ns))
         self.basler_seen += 1
 
