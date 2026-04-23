@@ -10,3 +10,4 @@ installers/
 *.db3
 .DS_Store
 installers/
+.claude/
