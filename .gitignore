@@ -11,3 +11,4 @@ installers/
 .DS_Store
 installers/
 .claude/
+.output/

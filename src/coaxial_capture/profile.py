@@ -54,6 +54,8 @@ class ExtractionConfig:
     crop_basler_image: bool
     basler_pixel_pitch_um: float | None
     event_pixel_pitch_um: float | None
+    basler_crop_offset_x_px: int
+    basler_crop_offset_y_px: int
     drop_leading_empty_windows: bool
     transparent_bg: bool
     skip_empty_windows: bool
@@ -159,6 +161,8 @@ def load_profile(profile_path: str | Path) -> Profile:
             crop_basler_image=bool(extraction.get("crop_basler_image", False)),
             basler_pixel_pitch_um=_optional_float(extraction, "basler_pixel_pitch_um"),
             event_pixel_pitch_um=_optional_float(extraction, "event_pixel_pitch_um"),
+            basler_crop_offset_x_px=int(extraction.get("basler_crop_offset_x_px", 0)),
+            basler_crop_offset_y_px=int(extraction.get("basler_crop_offset_y_px", 0)),
             drop_leading_empty_windows=bool(extraction.get("drop_leading_empty_windows", True)),
             transparent_bg=bool(_required(extraction, "transparent_bg")),
             skip_empty_windows=bool(_required(extraction, "skip_empty_windows")),

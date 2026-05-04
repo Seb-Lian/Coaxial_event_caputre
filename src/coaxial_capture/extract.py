@@ -44,6 +44,9 @@ def image_msg_to_cv2(msg: Image) -> np.ndarray:
     elif encoding in {"bgra8", "rgba8", "8uc4"}:
         dtype = np.uint8
         channels = 4
+    elif encoding in {"bayer_rggb8", "bayer_bggr8", "bayer_gbrg8", "bayer_grbg8"}:
+        dtype = np.uint8
+        channels = 1
     else:
         raise RuntimeError(f"Unsupported image encoding: {msg.encoding}")
 
@@ -78,17 +81,37 @@ def image_msg_to_cv2(msg: Image) -> np.ndarray:
         out = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
     elif encoding == "rgba8":
         out = cv2.cvtColor(out, cv2.COLOR_RGBA2BGRA)
+    elif encoding == "bayer_rggb8":
+        out = cv2.cvtColor(out, cv2.COLOR_BayerRG2BGR)
+    elif encoding == "bayer_bggr8":
+        out = cv2.cvtColor(out, cv2.COLOR_BayerBG2BGR)
+    elif encoding == "bayer_gbrg8":
+        out = cv2.cvtColor(out, cv2.COLOR_BayerGB2BGR)
+    elif encoding == "bayer_grbg8":
+        out = cv2.cvtColor(out, cv2.COLOR_BayerGR2BGR)
 
     return out
 
 
-def center_crop_image(image: np.ndarray, crop_width: int, crop_height: int) -> np.ndarray:
+def crop_image_with_offset(
+    image: np.ndarray,
+    crop_width: int,
+    crop_height: int,
+    offset_x_px: int,
+    offset_y_px: int,
+) -> np.ndarray:
     image_height, image_width = image.shape[:2]
     crop_width = max(1, min(int(crop_width), image_width))
     crop_height = max(1, min(int(crop_height), image_height))
 
-    left = max(0, (image_width - crop_width) // 2)
-    top = max(0, (image_height - crop_height) // 2)
+    center_x = (image_width / 2.0) + float(offset_x_px)
+    center_y = (image_height / 2.0) + float(offset_y_px)
+
+    left = int(round(center_x - (crop_width / 2.0)))
+    top = int(round(center_y - (crop_height / 2.0)))
+
+    left = max(0, min(left, image_width - crop_width))
+    top = max(0, min(top, image_height - crop_height))
     return image[top : top + crop_height, left : left + crop_width]
 
 
@@ -306,8 +329,10 @@ class OfflineExtractor:
         self.total_pairs_target = total_pairs_target
 
         self.basler_dir = self.output_dir / "basler"
+        self.basler_raw_dir = self.output_dir / "basler_raw"
         self.event_dir = self.output_dir / "event"
         self.basler_dir.mkdir(parents=True, exist_ok=True)
+        self.basler_raw_dir.mkdir(parents=True, exist_ok=True)
         self.event_dir.mkdir(parents=True, exist_ok=True)
 
         self.window_ns = int(profile.extraction.window_ms * 1_000_000.0)
@@ -320,6 +345,10 @@ class OfflineExtractor:
         self.skip_empty = profile.extraction.skip_empty_windows
         self.drop_leading_empty_windows = profile.extraction.drop_leading_empty_windows
         self.max_pairs = profile.extraction.max_pairs
+        self.event_output_width = int(profile.extraction.event_resolution.width)
+        self.event_output_height = int(profile.extraction.event_resolution.height)
+        self.basler_crop_offset_x_px = int(profile.extraction.basler_crop_offset_x_px)
+        self.basler_crop_offset_y_px = int(profile.extraction.basler_crop_offset_y_px)
 
         self.basler_crop_width: int | None = None
         self.basler_crop_height: int | None = None
@@ -341,15 +370,15 @@ class OfflineExtractor:
             event_pitch_um = float(profile.extraction.event_pixel_pitch_um)
             if basler_pitch_um <= 0.0 or event_pitch_um <= 0.0:
                 raise ValueError("basler_pixel_pitch_um and event_pixel_pitch_um must be positive")
-            self.basler_crop_width = int(round(float(profile.extraction.event_resolution.width) * event_pitch_um / basler_pitch_um))
-            self.basler_crop_height = int(round(float(profile.extraction.event_resolution.height) * event_pitch_um / basler_pitch_um))
+            self.basler_crop_width = int(round(float(self.event_output_width) * event_pitch_um / basler_pitch_um))
+            self.basler_crop_height = int(round(float(self.event_output_height) * event_pitch_um / basler_pitch_um))
 
         if self.image_ext not in {"png", "jpg", "jpeg"}:
             raise ValueError("image_ext must be png, jpg, or jpeg")
 
         self.decoder = Evt3DecoderState(
-            width=profile.extraction.event_resolution.width,
-            height=profile.extraction.event_resolution.height,
+            width=self.event_output_width,
+            height=self.event_output_height,
         )
 
         self.event_chunks: Deque[EventChunk] = deque()
@@ -525,16 +554,16 @@ class OfflineExtractor:
         if self.transparent_bg:
             on_mask = p.astype(bool)
             off_mask = ~on_mask
-            img[y[on_mask], x[on_mask], :3] = (0, 0, 255)
-            img[y[off_mask], x[off_mask], :3] = (255, 0, 0)
+            img[y[on_mask], x[on_mask], :3] = (0, 255, 0)
+            img[y[off_mask], x[off_mask], :3] = (0, 0, 255)
             img[y, x, 3] = 255
             return img
 
         if self.color_mode == "blue-red":
             on_mask = p.astype(bool)
             off_mask = ~on_mask
-            img[y[on_mask], x[on_mask], :] = (0, 0, 255)
-            img[y[off_mask], x[off_mask], :] = (255, 0, 0)
+            img[y[on_mask], x[on_mask], :] = (0, 255, 0)
+            img[y[off_mask], x[off_mask], :] = (0, 0, 255)
             return img
 
         on_mask = p.astype(bool)
@@ -566,10 +595,24 @@ class OfflineExtractor:
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to convert Basler image: {exc}") from exc
 
+        basler_img_raw = basler_img.copy()
+
         if self.mirror_basler_image:
             basler_img = cv2.flip(basler_img, 1)
         if self.crop_basler_image and self.basler_crop_width is not None and self.basler_crop_height is not None:
-            basler_img = center_crop_image(basler_img, self.basler_crop_width, self.basler_crop_height)
+            basler_img = crop_image_with_offset(
+                basler_img,
+                self.basler_crop_width,
+                self.basler_crop_height,
+                self.basler_crop_offset_x_px,
+                self.basler_crop_offset_y_px,
+            )
+            if basler_img.shape[1] != self.event_output_width or basler_img.shape[0] != self.event_output_height:
+                basler_img = cv2.resize(
+                    basler_img,
+                    (self.event_output_width, self.event_output_height),
+                    interpolation=cv2.INTER_LINEAR,
+                )
 
         event_img = self.render_event_image(x, y, p)
         if self.mirror_event_image:
@@ -579,9 +622,11 @@ class OfflineExtractor:
         delta_us = (ref_ns - basler_ns) / 1000.0
 
         stem = f"pair_{self.pair_count:06d}_{basler_ns}"
+        basler_raw_name = f"{stem}_basler_raw.{self.image_ext}"
         basler_name = f"{stem}_basler.{self.image_ext}"
         event_name = f"{stem}_event.{self.image_ext}"
 
+        basler_raw_path = self.basler_raw_dir / basler_raw_name
         basler_path = self.basler_dir / basler_name
         event_path = self.event_dir / event_name
 
@@ -596,6 +641,8 @@ class OfflineExtractor:
                 print(f"  t_ns max:     {t_ns.max()}")
                 print(f"  t_ns median:  {int(np.median(t_ns))}")
 
+        if not cv2.imwrite(str(basler_raw_path), basler_img_raw):
+            raise RuntimeError(f"Failed writing {basler_raw_path}")
         if not cv2.imwrite(str(basler_path), basler_img):
             raise RuntimeError(f"Failed writing {basler_path}")
         if not cv2.imwrite(str(event_path), event_img):

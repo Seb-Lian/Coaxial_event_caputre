@@ -77,7 +77,7 @@ Set it for the current boot:
 sudo ip link set dev eno1 down
 sudo ip link set dev eno1 mtu 8192
 sudo ip link set dev eno1 up
-ip -br link show eno1
+ifconfig
 ```
 
 If you use NetworkManager and want the setting to survive reboots, find the active connection name first and then update its MTU:
@@ -99,6 +99,7 @@ Capture output directory:
 Extraction output directory:
 
 - `basler/*.png` or `*.jpg`: Basler frames.
+- `basler_raw/*.png` or `*.jpg`: Original Basler frames before mirror/crop/resize.
 - `event/*.png` or `*.jpg`: Window-rendered event frames.
 - `pairs.csv`: Timestamp alignment metadata per pair.
 - `raw_events.csv`: Decoded raw event stream export (if enabled).
@@ -120,8 +121,10 @@ Extraction output directory:
 - Default capture records raw event packets only (`capture.launch_renderer: false`, `capture.include_renderer_topic: false`).
 - `extraction.mirror_basler_image`: Mirror Basler frames horizontally before saving during offline extraction.
 - `extraction.mirror_event_image`: Mirror rendered event frames horizontally before saving during offline extraction.
-- `extraction.crop_basler_image`: Center-crop Basler frames before saving during offline extraction.
+- `extraction.crop_basler_image`: Crop Basler frames before saving during offline extraction.
 - If cropping is enabled, set `basler_pixel_pitch_um` and `event_pixel_pitch_um` to the effective pixel pitches after any binning. The crop is computed as $w_c = \mathrm{round}(R_e^w \cdot p_e / p_b)$ and $h_c = \mathrm{round}(R_e^h \cdot p_e / p_b)$, where $R_e$ is the event sensor resolution and $p$ is pixel pitch in micrometers.
+- `extraction.basler_crop_offset_x_px` and `extraction.basler_crop_offset_y_px`: Horizontal and vertical crop-center offsets in Basler pixels. Positive $x$ shifts right; positive $y$ shifts down.
+- After cropping, Basler frames are resized to `extraction.event_resolution` so output Basler/event image pairs share the same resolution.
 - `extraction.drop_leading_empty_windows`: Drops startup Basler frames that have zero events so extraction begins at the first event-supported pair.
 - `extraction.window_ms`: Event window half-width around each Basler frame timestamp.
 
