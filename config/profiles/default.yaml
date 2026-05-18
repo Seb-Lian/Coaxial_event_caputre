@@ -30,13 +30,13 @@ topics:
   basler_info: /my_camera/pylon_ros2_camera_node/camera_info
 
 extraction:
-  window_ms: 10.0
+  window_ms: 16.66
   image_ext: png
   color_mode: blue-red
   mirror_basler_image: false
   mirror_event_image: true
   crop_basler_image: true
-  basler_pixel_pitch_um: 4.8
+  basler_pixel_pitch_um: 5.3 # 5.3 for aca1300-60gc
   event_pixel_pitch_um: 4.86
   basler_crop_offset_x_px: 7
   basler_crop_offset_y_px: 62
@@ -46,7 +46,7 @@ extraction:
   max_pairs: 0
   output_subdir: synced_pairs
   raw_events_csv: false
-  raw_events_hdf5: true
+  raw_events_hdf5: false
   event_resolution:
     width: 1280
     height: 720
