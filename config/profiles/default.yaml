@@ -21,7 +21,7 @@ capture:
   startup_message_check_sec: 2
   event_driver_launch: "ros2 launch /workspace/scripts/metavision_driver_composition_with_bias.launch.py serial:=00051466 erc_mode:=enabled erc_rate:=5000000 bias_file:=/workspace/config/event_camera/my_camera.bias"
   event_renderer_launch: "ros2 launch event_camera_renderer renderer.launch.py"
-  basler_launch: "/workspace/scripts/basler_launch_helper.sh --config-file /workspace/config/basler/basler_colour.yaml --camera-id my_camera --startup-user-set CurrentSetting --mtu-size 8192 --enable-status-publisher false --enable-current-params-publisher false"
+  basler_launch: "/workspace/scripts/basler_launch_helper.sh --config-file /workspace/config/basler/basler_colour.yaml --camera-id my_camera --startup-user-set Default --mtu-size 8192 --enable-status-publisher false --enable-current-params-publisher false --set_max_num_buffer 16 --enable-resend false"
 
 topics:
   event_packets: /event_camera/events
@@ -34,12 +34,12 @@ extraction:
   image_ext: png
   color_mode: blue-red
   mirror_basler_image: false
-  mirror_event_image: true
+  mirror_event_image: false
   crop_basler_image: true
-  basler_pixel_pitch_um: 5.3 # 5.3 for aca1300-60gc
+  basler_pixel_pitch_um: 4.8 # 5.3 for aca1300-60gc, 4.8 for acA1920-48gc
   event_pixel_pitch_um: 4.86
-  basler_crop_offset_x_px: 7
-  basler_crop_offset_y_px: 62
+  basler_crop_offset_x_px: 0
+  basler_crop_offset_y_px: 0
   drop_leading_empty_windows: true
   transparent_bg: true
   skip_empty_windows: false
@@ -47,6 +47,12 @@ extraction:
   output_subdir: synced_pairs
   raw_events_csv: false
   raw_events_hdf5: false
+  # Compensates for GigE transfer latency: the driver stamps frames at host
+  # receipt time, which lags behind the actual exposure end by roughly
+  # frame_size / link_bandwidth (~18 ms for 1920x1200 at full GigE).
+  # Measure: extract a short bag with this set to 0, take the median delta_us
+  # from pairs.csv, then set basler_timestamp_offset_ns = -median_delta_us * 1000
+  basler_timestamp_offset_ns: -333000000
   event_resolution:
     width: 1280
     height: 720

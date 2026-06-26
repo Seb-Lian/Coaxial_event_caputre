@@ -64,6 +64,7 @@ class ExtractionConfig:
     raw_events_csv: bool
     raw_events_hdf5: bool
     event_resolution: EventResolution
+    basler_timestamp_offset_ns: int
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,7 @@ def load_profile(profile_path: str | Path) -> Profile:
                 width=int(_required(resolution, "width")),
                 height=int(_required(resolution, "height")),
             ),
+            basler_timestamp_offset_ns=int(extraction.get("basler_timestamp_offset_ns", 0)),
         ),
     )
 

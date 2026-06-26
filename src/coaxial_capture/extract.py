@@ -84,7 +84,7 @@ def image_msg_to_cv2(msg: Image) -> np.ndarray:
     elif encoding == "bayer_rggb8":
         out = cv2.cvtColor(out, cv2.COLOR_BayerRG2BGR)
     elif encoding == "bayer_bggr8":
-        out = cv2.cvtColor(out, cv2.COLOR_BayerBG2BGR)
+        out = cv2.cvtColor(out, cv2.COLOR_BayerRG2BGR)
     elif encoding == "bayer_gbrg8":
         out = cv2.cvtColor(out, cv2.COLOR_BayerGB2BGR)
     elif encoding == "bayer_grbg8":
@@ -349,6 +349,7 @@ class OfflineExtractor:
         self.event_output_height = int(profile.extraction.event_resolution.height)
         self.basler_crop_offset_x_px = int(profile.extraction.basler_crop_offset_x_px)
         self.basler_crop_offset_y_px = int(profile.extraction.basler_crop_offset_y_px)
+        self.basler_timestamp_offset_ns = int(profile.extraction.basler_timestamp_offset_ns)
 
         self.basler_crop_width: int | None = None
         self.basler_crop_height: int | None = None
@@ -451,7 +452,11 @@ class OfflineExtractor:
         # Prefer driver/hardware header timestamp for the same reason as event
         # packets: recorder-side jitter is higher under CPU throttling.
         # ts_ns = choose_time_ns(bag_ts_ns, header_ns)
-        ts_ns = header_ns
+        # basler_timestamp_offset_ns compensates for GigE transfer latency: the
+        # host stamps frames at receipt, which lags behind actual exposure end by
+        # roughly frame_size / link_bandwidth. Set to a negative value (e.g.
+        # -18000000 for -18 ms) measured from the median delta_us in pairs.csv.
+        ts_ns = header_ns + self.basler_timestamp_offset_ns
         self.pending_basler.append((msg, ts_ns))
         self.basler_seen += 1
 
@@ -745,7 +750,7 @@ def run_extraction(
         raise RuntimeError(f"Bag path is missing metadata.yaml: {bag_path}")
 
     if output_dir is None:
-        output_dir = profile.paths.outputs_dir / f"{profile.extraction.output_subdir}_{bag_path.name}"
+        output_dir = profile.paths.outputs_dir / f"{profile.extraction.window_ms}_{profile.extraction.output_subdir}_{bag_path.name}"
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 

@@ -7,6 +7,8 @@ STARTUP_USER_SET="CurrentSetting"
 MTU_SIZE="1500"
 ENABLE_STATUS_PUBLISHER="false"
 ENABLE_CURRENT_PARAMS_PUBLISHER="false"
+SET_MAX_NUM_BUFFER="16"
+ENABLE_RESEND="true"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -34,6 +36,14 @@ while [[ $# -gt 0 ]]; do
       ENABLE_CURRENT_PARAMS_PUBLISHER="$2"
       shift 2
       ;;
+    --set_max_num_buffer)
+      SET_MAX_NUM_BUFFER="$2"
+      shift 2
+      ;;
+    --enable-resend)
+      ENABLE_RESEND="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1"
       exit 2
@@ -52,4 +62,12 @@ exec ros2 launch pylon_ros2_camera_wrapper pylon_ros2_camera.launch.py \
   startup_user_set:="$STARTUP_USER_SET" \
   mtu_size:="$MTU_SIZE" \
   enable_status_publisher:="$ENABLE_STATUS_PUBLISHER" \
-  enable_current_params_publisher:="$ENABLE_CURRENT_PARAMS_PUBLISHER"
+  enable_current_params_publisher:="$ENABLE_CURRENT_PARAMS_PUBLISHER" \
+  set_max_num_buffer:="$SET_MAX_NUM_BUFFER" \
+  enable_resend:="$ENABLE_RESEND" \
+  shutter_mode:="global" \
+  AcquisitionMode:="Continuous" \
+  TriggerSelector:="FrameStart" \
+  TriggerMode:="Off" \
+  set_grab_timeout:="500" \
+  set_white_balance_auto:="1" \
